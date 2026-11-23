@@ -51,20 +51,14 @@ function home() {
       <div class="small">${esc(next.scenario)}</div><br><button class="primary" id="go">${act ? `Continuar (${act.turn}/${TURNS})` : 'Começar (~5 min)'}</button>${act ? ' <button id="restart">Recomeçar</button>' : ''}</div>
     <div class="small">Chamadas hoje: ${usage()} / ${c.budget} · uma lição ≈ ${TURNS} chamadas</div>
     ${!c.key ? '<div class="card">⚠️ Add your free Gemini API key in ⚙️ first.</div>' : ''}
-    ${(() => { const h = store.get('history', []); return h.length ? `<h2>Conversas anteriores</h2>${h.map((x, i) => `<div class="lesson hist" data-i="${i}"><span>💬 ${esc(x.title)}</span><span class="small">${esc(x.date)}</span></div>`).reverse().join('')}` : ''; })()}
     <h2>Todas as lições</h2>
-    ${LESSONS.map(l => `<div class="lesson ${p.done.includes(l.id) ? 'done' : ''}" data-id="${l.id}"><span>${p.done.includes(l.id) ? '✅' : '▶️'} ${l.id}. ${esc(l.title)}</span><span class="small">${l.level}</span></div>`).join('')}
+    ${LESSONS.map(l => `<div class="lesson ${p.done.includes(l.id) ? 'done' : ''}" data-id="${l.id}"><span>${p.done.includes(l.id) ? '✅' : '▶️'} ${store.get('chats', {})[l.id] ? '💬 ' : ''}${l.id}. ${esc(l.title)}</span><span class="small">${l.level}</span></div>`).join('')}
     ${p.notes.length ? `<h2>Para revisar</h2>${p.notes.slice(-8).reverse().map(n => `<div class="card small">${esc(n)}</div>`).join('')}` : ''}
   </div>`;
   document.getElementById('go').onclick = () => { unlockAudio(); lesson(next); };
-  document.getElementById('restart')?.addEventListener('click', () => { localStorage.removeItem('active'); unlockAudio(); lesson(next); });
+  document.getElementById('restart')?.addEventListener('click', () => { localStorage.removeItem("active"); unlockAudio(); lesson(next, true); });
   document.getElementById('gear').onclick = settings;
-  document.querySelectorAll('.hist').forEach(el => el.onclick = () => review(store.get('history', [])[el.dataset.i]));
-  document.querySelectorAll('.lesson:not(.hist)').forEach(el => el.onclick = () => {
-    // a lesson you already completed opens its saved conversation first
-    const hs = store.get('history', []).filter(x => x.id == el.dataset.id && !(act && act.id == x.id));
-    if (hs.length) return review(hs[hs.length - 1], true);
-    unlockAudio(); if (act && act.id != el.dataset.id) localStorage.removeItem('active'); lesson(LESSONS.find(l => l.id == el.dataset.id)); });
+  document.querySelectorAll(".lesson").forEach(el => el.onclick = () => { unlockAudio(); lesson(LESSONS.find(l => l.id == el.dataset.id)); });
 }
 
 function settings() {
@@ -79,7 +73,7 @@ function settings() {
   document.getElementById('save').onclick = () => {
     store.set('cfg', { key: key.value.trim(), model: model.value.trim() || 'gemini-flash-lite-latest', budget: +budget.value || 400 }); home();
   };
-  document.getElementById('reset').onclick = () => { if (confirm('Reset all progress?')) { store.set('progress', { done: [], notes: [] }); home(); } };
+  document.getElementById('reset').onclick = () => { if (confirm('Reset all progress?')) { store.set('progress', { done: [], notes: [] }); store.set('chats', {}); localStorage.removeItem('active'); home(); } };
 }
 
 // ---------- Gemini ----------
@@ -135,6 +129,8 @@ function entryHtml(e, showHint = false) {
   if (e.k === 'ai') return `<div class="msg ai"><span class="pt">${wordsHtml(e.text)}</span> <button class="ghost" data-s="${esc(e.text)}">🔊</button><button class="ghost" data-slow="${esc(e.text)}">🐢</button><div class="en" style="display:${showHint ? 'block' : 'none'}">${esc(e.hint)}</div></div>`;
   if (e.k === 'me') return `<div class="msg me">${wordsHtml(e.text)}</div>`;
   if (e.k === 'fix') return `<div class="fix"><b>✏️ ${esc(e.said)}</b> → ${esc(e.better)}<br><span class="small">${esc(e.why)}</span></div>`;
+  if (e.k === 'sep') return `<div class="small" style="text-align:center;margin:16px 0">── Nova sessão · ${esc(e.text)} ──</div>`;
+  if (e.k === 'sum') return `<div class="card"><b>📘 Resumo</b><br><span class="small">${esc(e.text)}</span></div>`;
   if (e.k === 'tip') return `<div class="fix tip">🗣️ ${esc(e.text)}</div>`;
   return '';
 }
@@ -187,53 +183,50 @@ function wireChat(chat) {
     const m = e.target.closest('.ai'); if (m) { const en = m.querySelector('.en'); en.style.display = en.style.display === 'none' ? 'block' : 'none'; }
   };
 }
-function review(h, offerRetry) {
-  $app.innerHTML = `<header><button class="ghost" id="back">←</button><div><b>${esc(h.title)}</b> <span class="small">${esc(h.date)}</span></div><span></span></header>
-    <div class="chat" id="chat">${h.log.map(e => entryHtml(e, true)).join('')}${h.summary ? `<div class="card"><b>📘 Resumo</b><br><span class="small">${esc(h.summary)}</span></div>` : ''}
-    <div class="card"><button class="primary" id="again">Praticar de novo</button></div></div>`;
-  wireChat(document.getElementById('chat'));
-  document.getElementById('back').onclick = home;
-  document.getElementById('again').onclick = () => { unlockAudio(); localStorage.removeItem('active'); lesson(LESSONS.find(l => l.id === h.id)); };
-}
-
-function lesson(l) {
+// Each lesson owns one continuous chat. Redoing a lesson appends a new session to the same chat.
+function lesson(l, auto) {
   const c = cfg();
   if (!c.key) return settings();
   const opener = l.phrases[0] ? `Oi! Vamos praticar: "${l.phrases[0]}"` : 'Oi! Sobre o que você quer conversar hoje?';
-  // an unfinished lesson is restored exactly where you left it (also after iOS reloads the app)
-  const act = store.get('active', null), resumed = act && act.id === l.id ? act : null;
-  const msgs = resumed ? resumed.msgs : [{ role: 'ai', text: opener, hint: l.title + ' — ' + l.scenario }];
-  let turn = resumed ? resumed.turn : 0, busy = false, rec = null;
+  const log = (store.get('chats', {})[l.id] || {}).log || [];
+  const save = () => { const all = store.get('chats', {}); all[l.id] = { log }; store.set('chats', all); };
+  let act = store.get('active', null);
+  if (act && act.id === l.id && act.turn >= TURNS) { localStorage.removeItem('active'); act = null; }
+  const resumed = act && act.id === l.id ? act : null; // an unfinished session is restored exactly where you left it
+  let msgs = resumed ? resumed.msgs : [], turn = resumed ? resumed.turn : 0, live = !!resumed, busy = false, rec = null;
+  const persistAll = () => { save(); if (live) store.set('active', { id: l.id, msgs, turn }); };
   $app.innerHTML = `<header><button class="ghost" id="quit">←</button><div><b>${esc(l.title)}</b> <span class="small" id="tn"></span></div><span></span></header>
-    <div class="chat" id="chat"></div>
-    <div class="bar"><input id="txt" placeholder="Digite ou fale…" autocomplete="off"><button id="send">➤</button>${SR && !IOS_STANDALONE ? '<button class="mic" id="mic">🎤</button>' : ''}</div>`;
-  const chat = document.getElementById('chat'), txt = document.getElementById('txt');
+    <div class="chat" id="chat">${log.map(e => entryHtml(e)).join('')}</div>
+    <div class="bar" id="bar"${live ? '' : ' hidden'}><input id="txt" placeholder="Digite ou fale…" autocomplete="off"><button id="send">➤</button>${SR && !IOS_STANDALONE ? '<button class="mic" id="mic">🎤</button>' : ''}</div>`;
+  const chat = document.getElementById('chat'), txt = document.getElementById('txt'), bar = document.getElementById('bar');
   const add = html => { chat.insertAdjacentHTML('beforeend', html); chat.scrollTop = chat.scrollHeight; };
-  const log = resumed ? resumed.log : [], sid = resumed ? resumed.sid : Date.now();
-  const saveActive = () => store.set('active', { id: l.id, sid, msgs, turn, log });
-  // saved after every turn, so a conversation is never lost even if you leave early
-  const persist = summary => {
-    if (log.length < 2) return;
-    const h = store.get('history', []).filter(x => x.sid !== sid);
-    h.push({ sid, id: l.id, title: l.title, level: l.level, date: new Date().toLocaleDateString(), summary: summary || '', log });
-    store.set('history', h.slice(-60));
-  };
   const addEntry = e => { log.push(e); add(entryHtml(e)); };
   const aiBubble = m => addEntry({ k: 'ai', text: m.text, hint: m.hint });
+  const tn = () => document.getElementById('tn').textContent = live ? `${turn}/${TURNS}` : '';
   wireChat(chat);
   // whenever the chat area changes size (keyboard opening/closing), keep the newest message in view
   if (window.ResizeObserver) new ResizeObserver(() => { if (document.activeElement === txt) chat.scrollTop = chat.scrollHeight; }).observe(chat);
   document.getElementById('quit').onclick = () => { speechSynthesis.cancel(); rec?.abort?.(); home(); };
-  const tn = () => document.getElementById('tn').textContent = `${turn}/${TURNS}`;
-  tn();
-  if (resumed) { chat.insertAdjacentHTML('beforeend', log.map(e => entryHtml(e)).join('')); chat.scrollTop = chat.scrollHeight; }
-  else { aiBubble(msgs[0]); speak(opener); saveActive(); } // speak: user-gesture-initiated, unlocks iOS audio
-  if (turn >= TURNS) add(`<div class="card"><button class="primary" id="fin0">Concluir</button></div>`), document.getElementById('fin0').onclick = () => { localStorage.removeItem('active'); home(); };
-  if (IOS_STANDALONE) add(`<div class="small">🎤 To speak: tap the text box, then the microphone key on your keyboard (set to Portuguese). If you hear nothing, check the ringer switch and volume.</div>`);
+
+  function startSession() {
+    msgs = [{ role: 'ai', text: opener, hint: l.title + ' — ' + l.scenario }]; turn = 0; live = true;
+    if (log.length) addEntry({ k: 'sep', text: new Date().toLocaleDateString() });
+    aiBubble(msgs[0]); speak(opener); // runs inside a tap, which unlocks iOS audio
+    bar.hidden = false; tn(); persistAll();
+  }
+  tn(); chat.scrollTop = chat.scrollHeight;
+  if (!live) {
+    if (!log.length || auto) startSession();
+    else {
+      add(`<div class="card" id="againbox"><button class="primary" id="again">Praticar de novo</button><div class="small">Adds a new session to this chat.</div></div>`);
+      document.getElementById('again').onclick = () => { document.getElementById('againbox').remove(); unlockAudio(); startSession(); };
+    }
+  }
+  if (live && IOS_STANDALONE) add(`<div class="small">🎤 To speak: tap the text box, then the microphone key on your keyboard (set to Portuguese). If you hear nothing, check the ringer switch and volume.</div>`);
   setTimeout(() => { if (window.__ttsErr) add(`<div class="small">🔇 Voice error: ${esc(window.__ttsErr)}</div>`); }, 1500);
 
-  async function submit(said, conf) {
-    said = said.trim(); if (!said || busy || turn >= TURNS) return;
+  async function submit(said) {
+    said = said.trim(); if (!said || busy || !live || turn >= TURNS) return;
     busy = true; txt.value = '';
     msgs.push({ role: 'user', text: said }); turn++; tn();
     const meEntry = { k: 'me', text: said }; addEntry(meEntry);
@@ -247,13 +240,13 @@ function lesson(l) {
       const p = progress();
       (r.corrections || []).forEach(x => p.notes.push(`${x.said} → ${x.better}`));
       store.set('progress', p);
-      persist(); saveActive();
+      persistAll();
       if (turn >= TURNS) finish(r.summary);
     } catch (e) {
       document.getElementById('wait')?.remove(); turn--; msgs.pop(); tn();
-      log.splice(log.indexOf(meEntry), 1); // the failed message is removed from history and put back in the box
+      log.splice(log.indexOf(meEntry), 1); // the failed message goes back into the box
       [...chat.querySelectorAll('.msg.me')].pop()?.remove();
-      add(`<div class="fix">⚠️ ${esc(e.message)}</div>`); txt.value = said; saveActive();
+      add(`<div class="fix">⚠️ ${esc(e.message)}</div>`); txt.value = said; persistAll();
     }
     busy = false;
   }
@@ -261,9 +254,9 @@ function lesson(l) {
     const p = progress(); if (!p.done.includes(l.id)) p.done.push(l.id);
     if (summary) p.notes.push('📘 ' + l.title + ': ' + summary);
     store.set('progress', p);
-    persist(summary);
-    localStorage.removeItem('active');
-    add(`<div class="card"><b>🎉 Lição completa!</b><br><span class="small">${esc(summary || '')}</span><br><br><button class="primary" id="fin">Concluir</button></div>`);
+    live = false; localStorage.removeItem('active'); bar.hidden = true; tn();
+    addEntry({ k: 'sum', text: summary || 'Lição completa!' }); save();
+    add(`<div class="card"><button class="primary" id="fin">Concluir</button></div>`);
     document.getElementById('fin').onclick = home;
   }
   document.getElementById('send').onclick = () => submit(txt.value);
@@ -274,7 +267,7 @@ function lesson(l) {
     speechSynthesis.cancel();
     rec = new SR(); rec.lang = 'pt-BR'; rec.interimResults = false; rec.maxAlternatives = 1;
     mic.classList.add('rec');
-    rec.onresult = e => submit(e.results[0][0].transcript, e.results[0][0].confidence);
+    rec.onresult = e => submit(e.results[0][0].transcript);
     rec.onerror = e => { add(`<div class="small">Mic: ${esc(e.error)} — use the keyboard's 🎤 dictation key instead.</div>`); };
     rec.onend = () => { mic.classList.remove('rec'); rec = null; };
     rec.start();
@@ -282,6 +275,15 @@ function lesson(l) {
 }
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+(function migrate() { // old "history" list -> keep only the most recent chat, stored inside its lesson; drop the rest
+  const h = store.get('history', null);
+  if (!h) return;
+  const last = h[h.length - 1], chats = store.get('chats', {});
+  if (last && !chats[last.id]) { chats[last.id] = { log: last.log.concat(last.summary ? [{ k: 'sum', text: last.summary }] : []) }; store.set('chats', chats); }
+  const act = store.get('active', null);
+  if (act) { if (last && act.sid === last.sid) store.set('active', { id: act.id, msgs: act.msgs, turn: act.turn }); else localStorage.removeItem('active'); }
+  localStorage.removeItem('history');
+})();
 { // reopening the app drops you back into an unfinished lesson
   const act = store.get('active', null), l = act && LESSONS.find(x => x.id === act.id);
   if (l && cfg().key) lesson(l); else home();
