@@ -15,9 +15,12 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 
 // ---------- speech ----------
 let ptVoice = null;
+// prefer the best installed pt-BR voice: Premium > Enhanced > known good names > anything; or the one chosen in Settings
 function pickVoice() {
-  const vs = speechSynthesis.getVoices();
-  ptVoice = vs.find(v => v.lang === 'pt-BR' && /luciana|felipe|enhanced|premium/i.test(v.name)) || vs.find(v => v.lang === 'pt-BR') || null;
+  const vs = speechSynthesis.getVoices().filter(v => v.lang.replace('_', '-') === 'pt-BR');
+  const chosen = store.get('cfg', {}).voice;
+  const score = v => (/premium/i.test(v.name) ? 3 : /enhanced/i.test(v.name) ? 2 : /luciana|felipe|fernanda/i.test(v.name) ? 1 : 0);
+  ptVoice = vs.find(v => v.name === chosen) || [...vs].sort((a, b) => score(b) - score(a))[0] || null;
 }
 if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
 function speak(text, rate = 0.9) {
@@ -90,10 +93,15 @@ function settings() {
     <p>Gemini API key</p><input id="key" type="password" value="${esc(c.key)}" autocomplete="off">
     <p>Model <span class="small">(Flash-Lite has the biggest free daily allowance)</span></p><input id="model" value="${esc(c.model)}">
     <p>Daily call budget <span class="small">(app stops before your free limit; check your limit at aistudio.google.com)</span></p><input id="budget" type="number" value="${c.budget}">
+    <p>Voice <span class="small">(download Premium/Enhanced voices in iOS Settings for a more natural sound)</span></p><select id="voice"><option value="">Auto (best available)</option>${speechSynthesis.getVoices().filter(v => v.lang.replace('_', '-') === 'pt-BR').map(v => `<option ${v.name === c.voice ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select> <button id="vtest">▶︎ Test</button>
     <br><br><button class="primary" id="save">Save</button> <button id="reset">Reset progress</button></div>`;
   document.getElementById('back').onclick = home;
+  document.getElementById('vtest').onclick = () => {
+    const v = speechSynthesis.getVoices().find(x => x.name === voice.value); if (v) ptVoice = v; else pickVoice();
+    unlockAudio(); speak('Oi! Tudo bem? Vamos praticar português juntos.');
+  };
   document.getElementById('save').onclick = () => {
-    store.set('cfg', { key: key.value.trim(), model: model.value.trim() || 'gemini-flash-lite-latest', budget: +budget.value || 400 }); home();
+    store.set('cfg', { key: key.value.trim(), model: model.value.trim() || 'gemini-flash-lite-latest', budget: +budget.value || 400, voice: voice.value }); pickVoice(); home();
   };
   document.getElementById('reset').onclick = () => { if (confirm('Reset all progress?')) { store.set('progress', { done: [], notes: [] }); store.set('chats', {}); localStorage.removeItem('active'); home(); } };
 }
