@@ -51,16 +51,20 @@ function home() {
       <div class="small">${esc(next.scenario)}</div><br><button class="primary" id="go">${act ? `Continuar (${act.turn}/${TURNS})` : 'Começar (~5 min)'}</button>${act ? ' <button id="restart">Recomeçar</button>' : ''}</div>
     <div class="small">Chamadas hoje: ${usage()} / ${c.budget} · uma lição ≈ ${TURNS} chamadas</div>
     ${!c.key ? '<div class="card">⚠️ Add your free Gemini API key in ⚙️ first.</div>' : ''}
+    ${(() => { const h = store.get('history', []); return h.length ? `<h2>Conversas anteriores</h2>${h.map((x, i) => `<div class="lesson hist" data-i="${i}"><span>💬 ${esc(x.title)}</span><span class="small">${esc(x.date)}</span></div>`).reverse().join('')}` : ''; })()}
     <h2>Todas as lições</h2>
     ${LESSONS.map(l => `<div class="lesson ${p.done.includes(l.id) ? 'done' : ''}" data-id="${l.id}"><span>${p.done.includes(l.id) ? '✅' : '▶️'} ${l.id}. ${esc(l.title)}</span><span class="small">${l.level}</span></div>`).join('')}
-    ${(() => { const h = store.get('history', []); return h.length ? `<h2>Conversas anteriores</h2>${h.map((x, i) => `<div class="lesson hist" data-i="${i}"><span>💬 ${esc(x.title)}</span><span class="small">${esc(x.date)}</span></div>`).reverse().join('')}` : ''; })()}
     ${p.notes.length ? `<h2>Para revisar</h2>${p.notes.slice(-8).reverse().map(n => `<div class="card small">${esc(n)}</div>`).join('')}` : ''}
   </div>`;
   document.getElementById('go').onclick = () => { unlockAudio(); lesson(next); };
   document.getElementById('restart')?.addEventListener('click', () => { localStorage.removeItem('active'); unlockAudio(); lesson(next); });
   document.getElementById('gear').onclick = settings;
   document.querySelectorAll('.hist').forEach(el => el.onclick = () => review(store.get('history', [])[el.dataset.i]));
-  document.querySelectorAll('.lesson:not(.hist)').forEach(el => el.onclick = () => { unlockAudio(); if (act && act.id != el.dataset.id) localStorage.removeItem('active'); lesson(LESSONS.find(l => l.id == el.dataset.id)); });
+  document.querySelectorAll('.lesson:not(.hist)').forEach(el => el.onclick = () => {
+    // a lesson you already completed opens its saved conversation first
+    const hs = store.get('history', []).filter(x => x.id == el.dataset.id && !(act && act.id == x.id));
+    if (hs.length) return review(hs[hs.length - 1], true);
+    unlockAudio(); if (act && act.id != el.dataset.id) localStorage.removeItem('active'); lesson(LESSONS.find(l => l.id == el.dataset.id)); });
 }
 
 function settings() {
@@ -183,11 +187,13 @@ function wireChat(chat) {
     const m = e.target.closest('.ai'); if (m) { const en = m.querySelector('.en'); en.style.display = en.style.display === 'none' ? 'block' : 'none'; }
   };
 }
-function review(h) {
+function review(h, offerRetry) {
   $app.innerHTML = `<header><button class="ghost" id="back">←</button><div><b>${esc(h.title)}</b> <span class="small">${esc(h.date)}</span></div><span></span></header>
-    <div class="chat" id="chat">${h.log.map(e => entryHtml(e, true)).join('')}${h.summary ? `<div class="card"><b>📘 Resumo</b><br><span class="small">${esc(h.summary)}</span></div>` : ''}</div>`;
+    <div class="chat" id="chat">${h.log.map(e => entryHtml(e, true)).join('')}${h.summary ? `<div class="card"><b>📘 Resumo</b><br><span class="small">${esc(h.summary)}</span></div>` : ''}
+    <div class="card"><button class="primary" id="again">Praticar de novo</button></div></div>`;
   wireChat(document.getElementById('chat'));
   document.getElementById('back').onclick = home;
+  document.getElementById('again').onclick = () => { unlockAudio(); localStorage.removeItem('active'); lesson(LESSONS.find(l => l.id === h.id)); };
 }
 
 function lesson(l) {
@@ -215,6 +221,8 @@ function lesson(l) {
   const addEntry = e => { log.push(e); add(entryHtml(e)); };
   const aiBubble = m => addEntry({ k: 'ai', text: m.text, hint: m.hint });
   wireChat(chat);
+  // whenever the chat area changes size (keyboard opening/closing), keep the newest message in view
+  if (window.ResizeObserver) new ResizeObserver(() => { if (document.activeElement === txt) chat.scrollTop = chat.scrollHeight; }).observe(chat);
   document.getElementById('quit').onclick = () => { speechSynthesis.cancel(); rec?.abort?.(); home(); };
   const tn = () => document.getElementById('tn').textContent = `${turn}/${TURNS}`;
   tn();
@@ -289,7 +297,7 @@ function fitViewport() {
 // when the keyboard opens, jump to the newest message
 function scrollChat() {
   const chat = document.getElementById('chat');
-  if (chat) requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+  if (chat) requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; chat.lastElementChild?.scrollIntoView({ block: 'end' }); });
 }
 document.addEventListener('focusin', e => { if (e.target.id === 'txt') { scrollChat(); setTimeout(scrollChat, 150); setTimeout(scrollChat, 400); } });
 if (window.visualViewport) { visualViewport.addEventListener('resize', fitViewport); visualViewport.addEventListener('scroll', fitViewport); }
