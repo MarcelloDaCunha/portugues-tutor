@@ -22,11 +22,20 @@ function pickVoice() {
 if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
 function speak(text, rate = 0.9) {
   if (!('speechSynthesis' in window)) return;
-  speechSynthesis.cancel();
+  if (!ptVoice) pickVoice();
+  if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
+  speechSynthesis.resume();
   const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'pt-BR'; u.rate = rate; if (ptVoice) u.voice = ptVoice;
+  u.lang = 'pt-BR'; u.rate = rate; u.volume = 1; if (ptVoice) u.voice = ptVoice;
+  u.onerror = e => { if (e.error !== 'canceled' && e.error !== 'interrupted') window.__ttsErr = e.error; };
   speechSynthesis.speak(u);
 }
+// iOS only allows speech after one utterance started from a tap; call this inside tap handlers.
+function unlockAudio() {
+  if (!('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u);
+}
+const IOS_STANDALONE = navigator.standalone === true;
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 // ---------- home ----------
@@ -45,9 +54,9 @@ function home() {
     ${LESSONS.map(l => `<div class="lesson ${p.done.includes(l.id) ? 'done' : ''}" data-id="${l.id}"><span>${p.done.includes(l.id) ? '✅' : '▶️'} ${l.id}. ${esc(l.title)}</span><span class="small">${l.level}</span></div>`).join('')}
     ${p.notes.length ? `<h2>Para revisar</h2>${p.notes.slice(-8).reverse().map(n => `<div class="card small">${esc(n)}</div>`).join('')}` : ''}
   </div>`;
-  document.getElementById('go').onclick = () => lesson(next);
+  document.getElementById('go').onclick = () => { unlockAudio(); lesson(next); };
   document.getElementById('gear').onclick = settings;
-  document.querySelectorAll('.lesson').forEach(el => el.onclick = () => lesson(LESSONS.find(l => l.id == el.dataset.id)));
+  document.querySelectorAll('.lesson').forEach(el => el.onclick = () => { unlockAudio(); lesson(LESSONS.find(l => l.id == el.dataset.id)); });
 }
 
 function settings() {
@@ -114,7 +123,7 @@ function lesson(l) {
   let turn = 0, busy = false, rec = null;
   $app.innerHTML = `<header><button class="ghost" id="quit">←</button><div><b>${esc(l.title)}</b> <span class="small" id="tn"></span></div><span></span></header>
     <div class="chat" id="chat"></div>
-    <div class="bar"><input id="txt" placeholder="Digite ou fale…" autocomplete="off"><button id="send">➤</button>${SR ? '<button class="mic" id="mic">🎤</button>' : ''}</div>`;
+    <div class="bar"><input id="txt" placeholder="Digite ou fale…" autocomplete="off"><button id="send">➤</button>${SR && !IOS_STANDALONE ? '<button class="mic" id="mic">🎤</button>' : ''}</div>`;
   const chat = document.getElementById('chat'), txt = document.getElementById('txt');
   const add = html => { chat.insertAdjacentHTML('beforeend', html); chat.scrollTop = chat.scrollHeight; };
   const aiBubble = m => add(`<div class="msg ai"><span class="pt">${esc(m.text)}</span> <button class="ghost" data-s="${esc(m.text)}">🔊</button><button class="ghost" data-slow="${esc(m.text)}">🐢</button><div class="en" style="display:none">${esc(m.hint)}</div></div>`);
@@ -128,6 +137,8 @@ function lesson(l) {
   const tn = () => document.getElementById('tn').textContent = `${turn}/${TURNS}`;
   tn(); aiBubble(msgs[0]);
   speak(opener); // user-gesture-initiated, unlocks iOS audio
+  if (IOS_STANDALONE) add(`<div class="small">🎤 To speak: tap the text box, then the microphone key on your keyboard (set to Portuguese). If you hear nothing, check the ringer switch and volume.</div>`);
+  setTimeout(() => { if (window.__ttsErr) add(`<div class="small">🔇 Voice error: ${esc(window.__ttsErr)}</div>`); }, 1500);
 
   async function submit(said, conf) {
     said = said.trim(); if (!said || busy || turn >= TURNS) return;
