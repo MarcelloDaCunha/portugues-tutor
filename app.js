@@ -39,10 +39,19 @@ const IOS_STANDALONE = navigator.standalone === true;
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 // ---------- home ----------
+let currentLevel = null; // null = main screen, otherwise the level whose lessons are shown
+const LEVEL_NAMES = { A1: 'Iniciante', A2: 'Básico', B1: 'Intermediário', B2: 'Intermediário avançado', C1: 'Avançado' };
+// a lesson opens once the one before it is completed (or you've already started it)
+function unlocked(l, p) {
+  const i = LESSONS.indexOf(l), chats = store.get('chats', {}), act = store.get('active', null);
+  return i === 0 || p.done.includes(LESSONS[i - 1].id) || p.done.includes(l.id) || !!chats[l.id] || (act && act.id === l.id);
+}
 function home() {
   const p = progress(), c = cfg();
+  if (currentLevel) return levelScreen(currentLevel, p);
   const act = store.get('active', null);
   const next = (act && LESSONS.find(l => l.id === act.id)) || LESSONS.find(l => !p.done.includes(l.id)) || LESSONS[LESSONS.length - 1];
+  const levels = Object.keys(LEVELS);
   $app.innerHTML = `
   <header><h1>🇧🇷 Português</h1><button class="ghost" id="gear">⚙️</button></header>
   <div class="prog"><i style="width:${p.done.length / LESSONS.length * 100}%"></i></div>
@@ -51,14 +60,27 @@ function home() {
       <div class="small">${esc(next.scenario)}</div><br><button class="primary" id="go">${act ? `Continuar (${act.turn}/${TURNS})` : 'Começar (~5 min)'}</button>${act ? ' <button id="restart">Recomeçar</button>' : ''}</div>
     <div class="small">Chamadas hoje: ${usage()} / ${c.budget} · uma lição ≈ ${TURNS} chamadas</div>
     ${!c.key ? '<div class="card">⚠️ Add your free Gemini API key in ⚙️ first.</div>' : ''}
-    <h2>Todas as lições</h2>
-    ${LESSONS.map(l => `<div class="lesson ${p.done.includes(l.id) ? 'done' : ''}" data-id="${l.id}"><span>${p.done.includes(l.id) ? '✅' : '▶️'} ${store.get('chats', {})[l.id] ? '💬 ' : ''}${l.id}. ${esc(l.title)}</span><span class="small">${l.level}</span></div>`).join('')}
+    <h2>Níveis</h2>
+    ${levels.map(lv => {
+      const ls = LESSONS.filter(l => l.level === lv), done = ls.filter(l => p.done.includes(l.id)).length, open = unlocked(ls[0], p);
+      return `<div class="lesson level ${open ? '' : 'locked'}" data-level="${lv}"><span>${open ? '' : '🔒 '}<b>${lv}</b> · ${LEVEL_NAMES[lv]}</span><span class="small">${done}/${ls.length}</span></div>`;
+    }).join('')}
     ${p.notes.length ? `<h2>Para revisar</h2>${p.notes.slice(-8).reverse().map(n => `<div class="card small">${esc(n)}</div>`).join('')}` : ''}
   </div>`;
-  document.getElementById('go').onclick = () => { unlockAudio(); lesson(next); };
-  document.getElementById('restart')?.addEventListener('click', () => { localStorage.removeItem("active"); unlockAudio(); lesson(next, true); });
+  document.getElementById('go').onclick = () => { unlockAudio(); currentLevel = next.level; lesson(next); };
+  document.getElementById('restart')?.addEventListener('click', () => { localStorage.removeItem('active'); unlockAudio(); currentLevel = next.level; lesson(next, true); });
   document.getElementById('gear').onclick = settings;
-  document.querySelectorAll(".lesson").forEach(el => el.onclick = () => { unlockAudio(); lesson(LESSONS.find(l => l.id == el.dataset.id)); });
+  document.querySelectorAll('.level:not(.locked)').forEach(el => el.onclick = () => { currentLevel = el.dataset.level; home(); });
+}
+function levelScreen(lv, p) {
+  const chats = store.get('chats', {});
+  $app.innerHTML = `<header><button class="ghost" id="back">←</button><h1>${lv} · ${LEVEL_NAMES[lv]}</h1><span></span></header>
+  <div class="pad">${LESSONS.filter(l => l.level === lv).map(l => {
+    const open = unlocked(l, p);
+    return `<div class="lesson ${open ? '' : 'locked'} ${p.done.includes(l.id) ? 'done' : ''}" data-id="${l.id}"><span>${!open ? '🔒' : p.done.includes(l.id) ? '✅' : '▶️'} ${chats[l.id] ? '💬 ' : ''}${esc(l.title)}</span></div>`;
+  }).join('')}</div>`;
+  document.getElementById('back').onclick = () => { currentLevel = null; home(); };
+  document.querySelectorAll('.lesson:not(.locked)').forEach(el => el.onclick = () => { unlockAudio(); lesson(LESSONS.find(l => l.id == el.dataset.id)); });
 }
 
 function settings() {
@@ -286,7 +308,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 })();
 { // reopening the app drops you back into an unfinished lesson
   const act = store.get('active', null), l = act && LESSONS.find(x => x.id === act.id);
-  if (l && cfg().key) lesson(l); else home();
+  if (l && cfg().key) { currentLevel = l.level; lesson(l); } else home();
 }
 
 // keep the input bar pinned above the iOS keyboard
