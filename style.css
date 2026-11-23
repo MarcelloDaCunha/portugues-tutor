@@ -48,3 +48,4 @@ header{padding-top:calc(14px + env(safe-area-inset-top))}
 .flipin{animation:flipin .45s ease}
 @keyframes flipin{from{transform:rotateX(90deg);opacity:0}to{transform:none;opacity:1}}
 .chat:has(.fc){display:flex}
+.fc{touch-action:none}
