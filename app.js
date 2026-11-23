@@ -103,9 +103,15 @@ async function callGemini(l, turn, msgs, withThinking = true) {
     generationConfig: { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.7, maxOutputTokens: 400,
       ...(withThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}) }
   };
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(c.model)}:generateContent`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': c.key }, body: JSON.stringify(body)
-  });
+  let r;
+  for (let attempt = 0; attempt < 4; attempt++) { // 503/500/504 = Google temporarily overloaded: retry quietly
+    r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(c.model)}:generateContent`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': c.key }, body: JSON.stringify(body)
+    });
+    if (![500, 503, 504].includes(r.status)) break;
+    await new Promise(res => setTimeout(res, 1500 * (attempt + 1)));
+  }
+  if ([500, 503, 504].includes(r.status)) throw new Error('Google\'s server is busy right now. Your message is kept — tap ➤ to try again.');
   if (r.status === 429) throw new Error('Free-tier limit hit (429). Try again later or tomorrow.');
   if (r.status === 400 && withThinking) return callGemini(l, turn, msgs, false);
   if (!r.ok) throw new Error(`API error ${r.status}: ${(await r.text()).slice(0, 200)}`);
@@ -186,3 +192,8 @@ function lesson(l) {
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 home();
+
+// keep the input bar pinned above the iOS keyboard
+function fitViewport() { document.documentElement.style.setProperty('--vh', (window.visualViewport?.height || innerHeight) + 'px'); window.scrollTo(0, 0); }
+if (window.visualViewport) { visualViewport.addEventListener('resize', fitViewport); visualViewport.addEventListener('scroll', fitViewport); }
+fitViewport();

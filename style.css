@@ -25,3 +25,8 @@ input,textarea{width:100%;font:inherit;background:#1e293b;color:#e2e8f0;border:1
 .bar input{flex:1}
 .prog{height:6px;background:#1e293b;border-radius:3px;margin:0 16px}
 .prog i{display:block;height:100%;background:#16a34a;border-radius:3px}
+html,body{height:100%;overflow:hidden}
+#app{height:var(--vh,100dvh);min-height:0;overflow-y:auto}
+#app:has(.chat){overflow:hidden}
+.chat{min-height:0;overscroll-behavior:contain}
+header,.bar{flex:none}
