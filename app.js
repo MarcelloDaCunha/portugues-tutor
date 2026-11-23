@@ -41,13 +41,14 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 // ---------- home ----------
 function home() {
   const p = progress(), c = cfg();
-  const next = LESSONS.find(l => !p.done.includes(l.id)) || LESSONS[LESSONS.length - 1];
+  const act = store.get('active', null);
+  const next = (act && LESSONS.find(l => l.id === act.id)) || LESSONS.find(l => !p.done.includes(l.id)) || LESSONS[LESSONS.length - 1];
   $app.innerHTML = `
   <header><h1>🇧🇷 Português</h1><button class="ghost" id="gear">⚙️</button></header>
   <div class="prog"><i style="width:${p.done.length / LESSONS.length * 100}%"></i></div>
   <div class="pad">
-    <div class="card"><div class="small">Próxima lição · ${next.level}</div><h2 style="margin:4px 0">${esc(next.title)}</h2>
-      <div class="small">${esc(next.scenario)}</div><br><button class="primary" id="go">Começar (~5 min)</button></div>
+    <div class="card"><div class="small">${act ? 'Em andamento' : 'Próxima lição'} · ${next.level}</div><h2 style="margin:4px 0">${esc(next.title)}</h2>
+      <div class="small">${esc(next.scenario)}</div><br><button class="primary" id="go">${act ? `Continuar (${act.turn}/${TURNS})` : 'Começar (~5 min)'}</button>${act ? ' <button id="restart">Recomeçar</button>' : ''}</div>
     <div class="small">Chamadas hoje: ${usage()} / ${c.budget} · uma lição ≈ ${TURNS} chamadas</div>
     ${!c.key ? '<div class="card">⚠️ Add your free Gemini API key in ⚙️ first.</div>' : ''}
     <h2>Todas as lições</h2>
@@ -56,9 +57,10 @@ function home() {
     ${p.notes.length ? `<h2>Para revisar</h2>${p.notes.slice(-8).reverse().map(n => `<div class="card small">${esc(n)}</div>`).join('')}` : ''}
   </div>`;
   document.getElementById('go').onclick = () => { unlockAudio(); lesson(next); };
+  document.getElementById('restart')?.addEventListener('click', () => { localStorage.removeItem('active'); unlockAudio(); lesson(next); });
   document.getElementById('gear').onclick = settings;
   document.querySelectorAll('.hist').forEach(el => el.onclick = () => review(store.get('history', [])[el.dataset.i]));
-  document.querySelectorAll('.lesson:not(.hist)').forEach(el => el.onclick = () => { unlockAudio(); lesson(LESSONS.find(l => l.id == el.dataset.id)); });
+  document.querySelectorAll('.lesson:not(.hist)').forEach(el => el.onclick = () => { unlockAudio(); if (act && act.id != el.dataset.id) localStorage.removeItem('active'); lesson(LESSONS.find(l => l.id == el.dataset.id)); });
 }
 
 function settings() {
@@ -123,15 +125,58 @@ async function callGemini(l, turn, msgs, withThinking = true) {
 }
 
 // ---------- lesson ----------
+// every word is tappable for a definition
+const wordsHtml = t => String(t ?? '').split(/([\p{L}\p{M}'-]+)/u).map((p, i) => i % 2 ? `<span class="w">${esc(p)}</span>` : esc(p)).join('');
 function entryHtml(e, showHint = false) {
-  if (e.k === 'ai') return `<div class="msg ai"><span class="pt">${esc(e.text)}</span> <button class="ghost" data-s="${esc(e.text)}">🔊</button><button class="ghost" data-slow="${esc(e.text)}">🐢</button><div class="en" style="display:${showHint ? 'block' : 'none'}">${esc(e.hint)}</div></div>`;
-  if (e.k === 'me') return `<div class="msg me">${esc(e.text)}</div>`;
+  if (e.k === 'ai') return `<div class="msg ai"><span class="pt">${wordsHtml(e.text)}</span> <button class="ghost" data-s="${esc(e.text)}">🔊</button><button class="ghost" data-slow="${esc(e.text)}">🐢</button><div class="en" style="display:${showHint ? 'block' : 'none'}">${esc(e.hint)}</div></div>`;
+  if (e.k === 'me') return `<div class="msg me">${wordsHtml(e.text)}</div>`;
   if (e.k === 'fix') return `<div class="fix"><b>✏️ ${esc(e.said)}</b> → ${esc(e.better)}<br><span class="small">${esc(e.why)}</span></div>`;
   if (e.k === 'tip') return `<div class="fix tip">🗣️ ${esc(e.text)}</div>`;
   return '';
 }
+// ---------- dictionary (Wiktionary, free, no AI quota; falls back to one optional AI call) ----------
+const strip = h => h.replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#39;|&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+async function lookup(word) {
+  const w = word.toLowerCase(), cache = store.get('dict', {});
+  if (cache[w]) return cache[w];
+  const r = await fetch('https://en.wiktionary.org/api/rest_v1/page/definition/' + encodeURIComponent(w));
+  if (!r.ok) return null;
+  const pt = (await r.json()).pt;
+  if (!pt) return null;
+  const out = pt.slice(0, 3).map(s => ({ pos: s.partOfSpeech, defs: s.definitions.map(d => strip(d.definition)).filter(Boolean).slice(0, 3) }));
+  cache[w] = out; store.set('dict', cache);
+  return out;
+}
+async function aiDefine(word, sentence) {
+  const c = cfg();
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(c.model)}:generateContent`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': c.key },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: `Brazilian Portuguese word "${word}" in the sentence: "${sentence}". Give the English meaning and, if it is a verb form, the infinitive. Max 20 words.` }] }], generationConfig: { maxOutputTokens: 80 } })
+  });
+  if (!r.ok) throw new Error('AI error ' + r.status);
+  bump();
+  return (await r.json()).candidates[0].content.parts.map(p => p.text || '').join('');
+}
+async function showDef(word, sentence) {
+  $app.querySelector('.dict')?.remove();
+  $app.insertAdjacentHTML('beforeend', `<div class="dict"><div><b>${esc(word)}</b> <button class="ghost" data-s="${esc(word)}">🔊</button><button class="ghost" id="dx" style="float:right">✕</button></div><div id="dbody" class="small">…</div></div>`);
+  const box = $app.querySelector('.dict'), body = box.querySelector('#dbody');
+  box.querySelector('#dx').onclick = () => box.remove();
+  box.querySelector('[data-s]').onclick = () => speak(word, 0.7);
+  speak(word, 0.7);
+  let defs = null;
+  try { defs = await lookup(word); } catch {}
+  if (defs?.length) body.innerHTML = defs.map(s => `<i>${esc(s.pos)}</i><ul>${s.defs.map(d => `<li>${esc(d)}</li>`).join('')}</ul>`).join('');
+  else {
+    body.innerHTML = `No dictionary entry. <button id="ask">Ask AI (1 call)</button>`;
+    box.querySelector('#ask').onclick = async () => { body.textContent = '…'; try { body.textContent = await aiDefine(word, sentence); } catch (e) { body.textContent = e.message; } };
+  }
+}
+
 function wireChat(chat) {
   chat.onclick = e => {
+    const w = e.target.closest('.w');
+    if (w) return showDef(w.textContent, w.closest('.msg').textContent);
     const b = e.target.closest('button');
     if (b?.dataset.s) return speak(b.dataset.s);
     if (b?.dataset.slow) return speak(b.dataset.slow, 0.55);
@@ -149,14 +194,17 @@ function lesson(l) {
   const c = cfg();
   if (!c.key) return settings();
   const opener = l.phrases[0] ? `Oi! Vamos praticar: "${l.phrases[0]}"` : 'Oi! Sobre o que você quer conversar hoje?';
-  const msgs = [{ role: 'ai', text: opener, hint: l.title + ' — ' + l.scenario }];
-  let turn = 0, busy = false, rec = null;
+  // an unfinished lesson is restored exactly where you left it (also after iOS reloads the app)
+  const act = store.get('active', null), resumed = act && act.id === l.id ? act : null;
+  const msgs = resumed ? resumed.msgs : [{ role: 'ai', text: opener, hint: l.title + ' — ' + l.scenario }];
+  let turn = resumed ? resumed.turn : 0, busy = false, rec = null;
   $app.innerHTML = `<header><button class="ghost" id="quit">←</button><div><b>${esc(l.title)}</b> <span class="small" id="tn"></span></div><span></span></header>
     <div class="chat" id="chat"></div>
     <div class="bar"><input id="txt" placeholder="Digite ou fale…" autocomplete="off"><button id="send">➤</button>${SR && !IOS_STANDALONE ? '<button class="mic" id="mic">🎤</button>' : ''}</div>`;
   const chat = document.getElementById('chat'), txt = document.getElementById('txt');
   const add = html => { chat.insertAdjacentHTML('beforeend', html); chat.scrollTop = chat.scrollHeight; };
-  const log = [], sid = Date.now();
+  const log = resumed ? resumed.log : [], sid = resumed ? resumed.sid : Date.now();
+  const saveActive = () => store.set('active', { id: l.id, sid, msgs, turn, log });
   // saved after every turn, so a conversation is never lost even if you leave early
   const persist = summary => {
     if (log.length < 2) return;
@@ -169,8 +217,10 @@ function lesson(l) {
   wireChat(chat);
   document.getElementById('quit').onclick = () => { speechSynthesis.cancel(); rec?.abort?.(); home(); };
   const tn = () => document.getElementById('tn').textContent = `${turn}/${TURNS}`;
-  tn(); aiBubble(msgs[0]);
-  speak(opener); // user-gesture-initiated, unlocks iOS audio
+  tn();
+  if (resumed) { chat.insertAdjacentHTML('beforeend', log.map(e => entryHtml(e)).join('')); chat.scrollTop = chat.scrollHeight; }
+  else { aiBubble(msgs[0]); speak(opener); saveActive(); } // speak: user-gesture-initiated, unlocks iOS audio
+  if (turn >= TURNS) add(`<div class="card"><button class="primary" id="fin0">Concluir</button></div>`), document.getElementById('fin0').onclick = () => { localStorage.removeItem('active'); home(); };
   if (IOS_STANDALONE) add(`<div class="small">🎤 To speak: tap the text box, then the microphone key on your keyboard (set to Portuguese). If you hear nothing, check the ringer switch and volume.</div>`);
   setTimeout(() => { if (window.__ttsErr) add(`<div class="small">🔇 Voice error: ${esc(window.__ttsErr)}</div>`); }, 1500);
 
@@ -189,13 +239,13 @@ function lesson(l) {
       const p = progress();
       (r.corrections || []).forEach(x => p.notes.push(`${x.said} → ${x.better}`));
       store.set('progress', p);
-      persist();
+      persist(); saveActive();
       if (turn >= TURNS) finish(r.summary);
     } catch (e) {
       document.getElementById('wait')?.remove(); turn--; msgs.pop(); tn();
       log.splice(log.indexOf(meEntry), 1); // the failed message is removed from history and put back in the box
       [...chat.querySelectorAll('.msg.me')].pop()?.remove();
-      add(`<div class="fix">⚠️ ${esc(e.message)}</div>`); txt.value = said;
+      add(`<div class="fix">⚠️ ${esc(e.message)}</div>`); txt.value = said; saveActive();
     }
     busy = false;
   }
@@ -204,6 +254,7 @@ function lesson(l) {
     if (summary) p.notes.push('📘 ' + l.title + ': ' + summary);
     store.set('progress', p);
     persist(summary);
+    localStorage.removeItem('active');
     add(`<div class="card"><b>🎉 Lição completa!</b><br><span class="small">${esc(summary || '')}</span><br><br><button class="primary" id="fin">Concluir</button></div>`);
     document.getElementById('fin').onclick = home;
   }
@@ -223,13 +274,23 @@ function lesson(l) {
 }
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
-home();
+{ // reopening the app drops you back into an unfinished lesson
+  const act = store.get('active', null), l = act && LESSONS.find(x => x.id === act.id);
+  if (l && cfg().key) lesson(l); else home();
+}
 
 // keep the input bar pinned above the iOS keyboard
 function fitViewport() {
   const vv = window.visualViewport, s = document.documentElement.style;
   s.setProperty('--vh', (vv?.height || innerHeight) + 'px');
   s.setProperty('--vt', (vv?.offsetTop || 0) + 'px');
+  scrollChat();
 }
+// when the keyboard opens, jump to the newest message
+function scrollChat() {
+  const chat = document.getElementById('chat');
+  if (chat) requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+}
+document.addEventListener('focusin', e => { if (e.target.id === 'txt') { scrollChat(); setTimeout(scrollChat, 150); setTimeout(scrollChat, 400); } });
 if (window.visualViewport) { visualViewport.addEventListener('resize', fitViewport); visualViewport.addEventListener('scroll', fitViewport); }
 fitViewport();
