@@ -40,8 +40,23 @@ function speak(text, rate = 0.9) {
   u.onerror = e => { if (e.error !== 'canceled' && e.error !== 'interrupted') window.__ttsErr = e.error; };
   speechSynthesis.speak(u);
 }
+// Make voices play even with the iPhone's silent switch on: ask iOS for a "playback" audio session
+// and keep a silent looping clip going (web speech otherwise follows the ringer switch).
+try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
+function keepAudioAlive() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
+  if (window.__silent) { window.__silent.play().catch(() => {}); return; }
+  const n = 800, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, s) => [...s].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, 8000, true); v.setUint32(28, 16000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, n * 2, true); // n samples of silence
+  const a = new Audio(URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
+  a.loop = true; a.setAttribute('playsinline', ''); a.play().catch(() => {}); window.__silent = a;
+}
 // iOS only allows speech after one utterance started from a tap; call this inside tap handlers.
 function unlockAudio() {
+  keepAudioAlive();
   if (!('speechSynthesis' in window)) return;
   const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u);
 }
@@ -463,3 +478,7 @@ function scrollChat() {
 document.addEventListener('focusin', e => { if (e.target.id === 'txt') { scrollChat(); setTimeout(scrollChat, 150); setTimeout(scrollChat, 400); } });
 if (window.visualViewport) { visualViewport.addEventListener('resize', fitViewport); visualViewport.addEventListener('scroll', fitViewport); }
 fitViewport();
+
+// start the silent session on the very first tap anywhere, and restart it when the app returns from the background
+document.addEventListener('pointerdown', () => keepAudioAlive(), { once: true });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && window.__silent) window.__silent.play().catch(() => {}); });
