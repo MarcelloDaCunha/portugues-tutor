@@ -42,3 +42,9 @@ header{padding-top:calc(14px + env(safe-area-inset-top))}
 .bar[hidden]{display:none}
 .lesson.locked{opacity:.35;pointer-events:none;filter:grayscale(1)}
 .level{padding:16px 14px}
+.fc{margin:auto;text-align:center;padding:28px 20px;border-radius:18px;background:#1e293b;width:100%}
+.fcw{font-size:34px;font-weight:700;margin:10px 0}
+.fc.ok{background:#166534}.fc.bad{background:#991b1b}
+.flipin{animation:flipin .45s ease}
+@keyframes flipin{from{transform:rotateX(90deg);opacity:0}to{transform:none;opacity:1}}
+.chat:has(.fc){display:flex}

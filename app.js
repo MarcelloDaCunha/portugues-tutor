@@ -68,11 +68,12 @@ function home() {
       const ls = LESSONS.filter(l => l.level === lv), done = ls.filter(l => p.done.includes(l.id)).length, open = unlocked(ls[0], p);
       return `<div class="lesson level ${open ? '' : 'locked'}" data-level="${lv}"><span>${open ? '' : '🔒 '}<b>${lv}</b> · ${LEVEL_NAMES[lv]}</span><span class="small">${done}/${ls.length}</span></div>`;
     }).join('')}
-    ${p.notes.length ? `<h2>Para revisar</h2>${p.notes.slice(-8).reverse().map(n => `<div class="card small">${esc(n)}</div>`).join('')}` : ''}
+    <h2>Flashcards</h2><div class="lesson" id="cards"><span>🃏 Revisar palavras novas</span><span class="small">${store.get('cards', []).length}</span></div>
   </div>`;
   document.getElementById('go').onclick = () => { unlockAudio(); currentLevel = next.level; lesson(next); };
   document.getElementById('restart')?.addEventListener('click', () => { localStorage.removeItem('active'); unlockAudio(); currentLevel = next.level; lesson(next, true); });
   document.getElementById('gear').onclick = settings;
+  document.getElementById('cards').onclick = () => { unlockAudio(); flashcards(); };
   document.querySelectorAll('.level:not(.locked)').forEach(el => el.onclick = () => { currentLevel = el.dataset.level; home(); });
 }
 function levelScreen(lv, p) {
@@ -113,7 +114,8 @@ const SCHEMA = {
     reply: { type: 'STRING' }, hint_en: { type: 'STRING' },
     corrections: { type: 'ARRAY', items: { type: 'OBJECT', properties: { said: { type: 'STRING' }, better: { type: 'STRING' }, why: { type: 'STRING' } }, required: ['said', 'better', 'why'] } },
     pronunciation: { type: 'STRING' },
-    summary: { type: 'STRING' }
+    summary: { type: 'STRING' },
+    words: { type: 'ARRAY', items: { type: 'OBJECT', properties: { pt: { type: 'STRING' }, en: { type: 'STRING' } }, required: ['pt', 'en'] } }
   },
   required: ['reply', 'hint_en', 'corrections']
 };
@@ -123,7 +125,7 @@ function systemPrompt(l, turn) {
 Learner level: ${l.level} — ${LEVELS[l.level]}.
 Lesson: "${l.title}". Role-play: ${l.scenario} Target phrases: ${l.phrases.join(' | ') || 'free'}. Grammar focus: ${l.grammar}.
 Each turn: (1) "reply": 1–2 short pt-BR sentences in character, at the learner's level, ending with a question or prompt that makes them speak; weave in a target phrase. (2) "hint_en": English translation, under 15 words. (3) "corrections": 0–2 of the learner's most important errors in their LAST message (grammar, wrong word, unnatural phrasing); each "why" under 15 words, English. Empty array if fine. The input is a speech-to-text transcript: ignore punctuation, capitalization and accents. (4) "pronunciation": only if the transcript suggests a mispronounced word (recognizer wrote a different word than the likely intended one) or a classic pt-BR pitfall in what they said (nasal vowels ão/ãe, r/rr as h, d/t before i = dj/tch, lh, final l = w); one tip under 20 words; else omit.
-This is learner turn ${turn} of ${TURNS}.${turn >= TURNS ? ' FINAL turn: say a brief goodbye in "reply" and fill "summary": one English line with what they did well, the top 2 things to practice, and 3 new words (word=meaning).' : ''}`;
+This is learner turn ${turn} of ${TURNS}.${turn >= TURNS ? ' FINAL turn: say a brief goodbye in "reply" and fill "summary": one English line with what they did well and the top 2 things to practice; and fill "words": 4 useful new Portuguese words or short phrases from this lesson (dictionary form, e.g. infinitive for verbs) with short English meanings.' : ''}`;
 }
 
 async function callGemini(l, turn, msgs, withThinking = true) {
@@ -132,7 +134,7 @@ async function callGemini(l, turn, msgs, withThinking = true) {
   const body = {
     systemInstruction: { parts: [{ text: systemPrompt(l, turn) }] },
     contents: msgs.slice(-HISTORY_SENT).map(m => ({ role: m.role === 'ai' ? 'model' : 'user', parts: [{ text: m.text }] })),
-    generationConfig: { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.7, maxOutputTokens: 400,
+    generationConfig: { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.7, maxOutputTokens: 700,
       ...(withThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}) }
   };
   let r;
@@ -267,11 +269,8 @@ function lesson(l, auto) {
       (r.corrections || []).forEach(x => addEntry({ k: 'fix', said: x.said, better: x.better, why: x.why }));
       if (r.pronunciation) addEntry({ k: 'tip', text: r.pronunciation });
       const m = { role: 'ai', text: r.reply, hint: r.hint_en }; msgs.push(m); aiBubble(m); speak(r.reply);
-      const p = progress();
-      (r.corrections || []).forEach(x => p.notes.push(`${x.said} → ${x.better}`));
-      store.set('progress', p);
       persistAll();
-      if (turn >= TURNS) finish(r.summary);
+      if (turn >= TURNS) finish(r.summary, r.words);
     } catch (e) {
       document.getElementById('wait')?.remove(); turn--; msgs.pop(); tn();
       log.splice(log.indexOf(meEntry), 1); // the failed message goes back into the box
@@ -280,9 +279,9 @@ function lesson(l, auto) {
     }
     busy = false;
   }
-  function finish(summary) {
+  function finish(summary, words) {
     const p = progress(); if (!p.done.includes(l.id)) p.done.push(l.id);
-    if (summary) p.notes.push('📘 ' + l.title + ': ' + summary);
+    addCards(words, l.title);
     store.set('progress', p);
     live = false; localStorage.removeItem('active'); bar.hidden = true; tn();
     addEntry({ k: 'sum', text: summary || 'Lição completa!' }); save();
@@ -304,6 +303,84 @@ function lesson(l, auto) {
   };
 }
 
+// ---------- flashcards (new words from finished lessons) ----------
+const norm = s => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+function lev(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+function addCards(words, lesson) {
+  if (!Array.isArray(words)) return;
+  const cards = store.get('cards', []);
+  for (const w of words) {
+    if (!w?.pt || !w?.en || cards.some(c => norm(c.pt) === norm(w.pt))) continue;
+    cards.push({ pt: String(w.pt).trim(), en: String(w.en).trim(), lesson });
+  }
+  store.set('cards', cards);
+}
+const isMatch = (said, target) => {
+  const a = norm(said), b = norm(target);
+  return !!a && (a === b || a.split(' ').includes(b) || (b.length >= 5 && lev(a, b) <= 1));
+};
+function flashcards() {
+  const cards = store.get('cards', []);
+  $app.innerHTML = `<header><button class="ghost" id="back">←</button><h1>🃏 Flashcards</h1><span class="small" id="fcn"></span></header>
+    <div class="chat" id="fcarea"></div>
+    <div class="bar" id="fcbar"><input id="fcin" placeholder="Diga ou digite a palavra…" autocomplete="off" autocapitalize="off"><button id="fcsend">➤</button><button id="fcskip">?</button>${SR && !IOS_STANDALONE ? '<button class="mic" id="fcmic">🎤</button>' : ''}</div>`;
+  document.getElementById('back').onclick = () => { speechSynthesis.cancel(); home(); };
+  const area = document.getElementById('fcarea'), inp = document.getElementById('fcin'), bar = document.getElementById('fcbar');
+  if (!cards.length) { bar.hidden = true; area.innerHTML = '<div class="card">No cards yet. Finish a lesson and its new words show up here.</div>'; return; }
+  const queue = cards.map((_, i) => i).sort(() => Math.random() - 0.5);
+  let pos = 0, right = 0, total = 0, locked = false, retried = new Set(), rec = null;
+  const show = () => {
+    locked = false; inp.value = ''; bar.hidden = false;
+    if (pos >= queue.length) {
+      bar.hidden = true;
+      area.innerHTML = `<div class="fc"><div class="fcw">🎉</div><div class="small">${right} / ${total} certas</div><br><button class="primary" id="again">Praticar de novo</button></div>`;
+      document.getElementById('again').onclick = flashcards; return;
+    }
+    const c = cards[queue[pos]];
+    document.getElementById('fcn').textContent = `${Math.min(pos + 1, queue.length)}/${queue.length}`;
+    area.innerHTML = `<div class="fc flipin"><div class="small">Diga em voz alta</div><div class="fcw">${esc(c.pt)}</div><button class="ghost" id="fcspeak">🔊</button>${IOS_STANDALONE ? '<div class="small">Toque na caixa e use o microfone do teclado.</div>' : ''}</div>`;
+    document.getElementById('fcspeak').onclick = () => speak(c.pt, 0.7);
+    speak(c.pt, 0.8);
+  };
+  const next = () => { pos++; show(); };
+  function answer(said, skipped) {
+    if (locked) return; if (!skipped && !said.trim()) return;
+    locked = true; total++;
+    const idx = queue[pos], c = cards[idx], ok = !skipped && isMatch(said, c.pt), el = area.querySelector('.fc');
+    if (ok) {
+      right++; el.className = 'fc ok'; el.innerHTML = `<div class="fcw">✓ ${esc(c.pt)}</div><div class="small">${esc(c.en)}</div>`;
+      setTimeout(next, 1100);
+    } else {
+      el.className = 'fc bad flipin';
+      el.innerHTML = `<div class="small">${esc(c.pt)} 🔊</div><div class="fcw">${esc(c.en)}</div>${said ? `<div class="small">Ouvi: ${esc(said)}</div>` : ''}<br><button class="primary" id="fcnext">Próxima ➜</button>`;
+      speak(c.pt, 0.7);
+      if (!retried.has(idx)) { retried.add(idx); queue.splice(Math.min(pos + 4, queue.length), 0, idx); } // see it again soon
+      document.getElementById('fcnext').onclick = next;
+    }
+  }
+  document.getElementById('fcsend').onclick = () => answer(inp.value);
+  inp.onkeydown = e => { if (e.key === 'Enter') answer(inp.value); };
+  document.getElementById('fcskip').onclick = () => answer('', true);
+  const mic = document.getElementById('fcmic');
+  if (mic) mic.onclick = () => {
+    if (rec) { rec.stop(); return; }
+    speechSynthesis.cancel();
+    rec = new SR(); rec.lang = 'pt-BR'; rec.maxAlternatives = 3;
+    mic.classList.add('rec');
+    rec.onresult = e => { const alts = [...e.results[0]].map(a => a.transcript); const c = cards[queue[pos]]; answer(alts.find(a => isMatch(a, c.pt)) || alts[0]); };
+    rec.onerror = () => { inp.placeholder = 'Mic indisponível — use o teclado'; };
+    rec.onend = () => { mic.classList.remove('rec'); rec = null; };
+    rec.start();
+  };
+  show();
+}
+
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 (function migrate() { // old "history" list -> keep only the most recent chat, stored inside its lesson; drop the rest
   const h = store.get('history', null);
@@ -313,6 +390,17 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
   const act = store.get('active', null);
   if (act) { if (last && act.sid === last.sid) store.set('active', { id: act.id, msgs: act.msgs, turn: act.turn }); else localStorage.removeItem('active'); }
   localStorage.removeItem('history');
+})();
+(function migrateCards() { // old "Para revisar" notes are dropped; vocab from earlier lesson summaries ("word=meaning") becomes flashcards
+  if (store.get('cardsMigrated', false)) return;
+  const chats = store.get('chats', {});
+  for (const id in chats) for (const e of chats[id].log || []) {
+    if (e.k !== 'sum') continue;
+    const words = [...String(e.text).matchAll(/([\p{L}][\p{L}' -]{0,30}?)\s*=\s*([^,;)=\n]{2,40})/gu)].map(m => ({ pt: m[1].trim(), en: m[2].trim() })).filter(w => w.pt.split(' ').length <= 3);
+    const l = LESSONS.find(x => x.id == id); addCards(words, l ? l.title : '');
+  }
+  const p = progress(); delete p.notes; p.notes = []; store.set('progress', p);
+  store.set('cardsMigrated', true);
 })();
 { // reopening the app drops you back into an unfinished lesson
   const act = store.get('active', null), l = act && LESSONS.find(x => x.id === act.id);
