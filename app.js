@@ -75,7 +75,7 @@ function home() {
       const ls = LESSONS.filter(l => l.level === lv), done = ls.filter(l => p.done.includes(l.id)).length, open = unlocked(ls[0], p);
       return `<div class="lesson level ${open ? '' : 'locked'}" data-level="${lv}"><span>${open ? '' : '🔒 '}<b>${lv}</b> · ${LEVEL_NAMES[lv]}</span><span class="small">${done}/${ls.length}</span></div>`;
     }).join('')}
-    <h2>Flashcards</h2><div class="lesson" id="cards"><span>🃏 Revisar palavras novas</span><span class="small">${store.get('cards', []).length}</span></div>
+    <h2>Flashcards</h2><div class="lesson" id="cards"><span>🃏 Revisar palavras novas</span><span class="small">${store.get('cards', []).length} · ✓${store.get('cardStats', { right: 0 }).right} ✗${store.get('cardStats', { wrong: 0 }).wrong}</span></div>
   </div>`;
   document.getElementById('go').onclick = () => { unlockAudio(); currentLevel = next.level; lesson(next); };
   document.getElementById('restart')?.addEventListener('click', () => { localStorage.removeItem('active'); unlockAudio(); currentLevel = next.level; lesson(next, true); });
@@ -333,9 +333,14 @@ const isMatch = (said, en) => {
 function flashcards() {
   const cards = store.get('cards', []);
   $app.innerHTML = `<header><button class="ghost" id="back">←</button><h1>🃏 Flashcards</h1><span class="small" id="fcn"></span></header>
+    <div class="small" id="fcstats" style="text-align:center;padding:0 16px 6px"></div>
     <div class="chat" id="fcarea"></div>
     <div class="bar" id="fcbar"><input id="fcin" placeholder="Say or type the English meaning…" autocomplete="off" autocapitalize="off"><button id="fcsend">➤</button><button id="fcskip">?</button>${SR && !IOS_STANDALONE ? '<button class="mic" id="fcmic">🎤</button>' : ''}</div>`;
   document.getElementById('back').onclick = () => { speechSynthesis.cancel(); home(); };
+  const stats = () => store.get('cardStats', { right: 0, wrong: 0 });
+  const bumpStat = k => store.set('cardStats', { ...stats(), [k]: stats()[k] + 1 });
+  const showStats = () => { const s = stats(), t = s.right + s.wrong; document.getElementById('fcstats').innerHTML = `Total: <b style="color:#4ade80">✓ ${s.right}</b> · <b style="color:#f87171">✗ ${s.wrong}</b>${t ? ` · ${Math.round(s.right / t * 100)}%` : ''}`; };
+  showStats();
   const area = document.getElementById('fcarea'), inp = document.getElementById('fcin'), bar = document.getElementById('fcbar');
   if (!cards.length) { bar.hidden = true; area.innerHTML = '<div class="card">No cards yet. Finish a lesson and its new words show up here.</div>'; return; }
   // cards are never removed; each session picks the 15 you know least (new and often-missed first)
@@ -351,7 +356,7 @@ function flashcards() {
     }
     const c = cards[queue[pos]];
     document.getElementById('fcn').textContent = `${Math.min(pos + 1, queue.length)}/${queue.length}`;
-    area.innerHTML = `<div class="fc flipin"><div class="small">What does it mean? Say it in English</div><div class="fcw">${esc(c.pt)}</div><button class="ghost" id="fcspeak">🔊</button>${IOS_STANDALONE ? '<div class="small">Tap the box and use the keyboard microphone key (English).</div>' : ''}</div>`;
+    area.innerHTML = `<div class="fc flipin"><div class="small">What does it mean? Say it in English</div><div class="fcw">${esc(c.pt)}</div><div class="small">This card: ✓ ${c.ok || 0} · ✗ ${c.miss || 0}</div><button class="ghost" id="fcspeak">🔊</button>${IOS_STANDALONE ? '<div class="small">Tap the box and use the keyboard microphone key (English).</div>' : ''}</div>`;
     document.getElementById('fcspeak').onclick = () => speak(c.pt, 0.7);
     speak(c.pt, 0.8);
   };
@@ -361,13 +366,13 @@ function flashcards() {
     locked = true; total++;
     const idx = queue[pos], c = cards[idx], ok = !skipped && isMatch(said, c.en), el = area.querySelector('.fc');
     if (ok) {
-      right++; c.ok = (c.ok || 0) + 1; store.set('cards', cards); el.className = 'fc ok'; el.innerHTML = `<div class="fcw">✓ ${esc(c.pt)}</div><div class="small">${esc(c.en)}</div>`;
+      right++; c.ok = (c.ok || 0) + 1; store.set('cards', cards); bumpStat('right'); showStats(); el.className = 'fc ok'; el.innerHTML = `<div class="fcw">✓ ${esc(c.pt)}</div><div class="small">${esc(c.en)}</div>`;
       setTimeout(next, 1100);
     } else {
       el.className = 'fc bad flipin';
       el.innerHTML = `<div class="small">${esc(c.pt)} 🔊</div><div class="fcw">${esc(c.en)}</div>${said ? `<div class="small">Heard: ${esc(said)}</div>` : ''}<br><button class="primary" id="fcnext">Próxima ➜</button>`;
       speak(c.pt, 0.7);
-      c.miss = (c.miss || 0) + 1; store.set('cards', cards);
+      c.miss = (c.miss || 0) + 1; store.set('cards', cards); bumpStat('wrong'); showStats();
       if (!retried.has(idx)) { retried.add(idx); queue.splice(Math.min(pos + 4, queue.length), 0, idx); } // see it again soon
       document.getElementById('fcnext').onclick = next;
     }
