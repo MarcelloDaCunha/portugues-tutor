@@ -356,7 +356,7 @@ function flashcards() {
     }
     const c = cards[queue[pos]];
     document.getElementById('fcn').textContent = `${Math.min(pos + 1, queue.length)}/${queue.length}`;
-    area.innerHTML = `<div class="fc flipin"><div class="small">What does it mean? Say it in English</div><div class="fcw">${esc(c.pt)}</div><div class="small">This card: ✓ ${c.ok || 0} · ✗ ${c.miss || 0}</div><button class="ghost" id="fcspeak">🔊</button>${IOS_STANDALONE ? '<div class="small">Tap the box and use the keyboard microphone key (English).</div>' : ''}</div>`;
+    area.innerHTML = `<div class="fc flipin"><div class="small">What does it mean? Say it in English<br>← swipe to skip →</div><div class="fcw">${esc(c.pt)}</div><div class="small">This card: ✓ ${c.ok || 0} · ✗ ${c.miss || 0}</div><button class="ghost" id="fcspeak">🔊</button>${IOS_STANDALONE ? '<div class="small">Tap the box and use the keyboard microphone key (English).</div>' : ''}</div>`;
     document.getElementById('fcspeak').onclick = () => speak(c.pt, 0.7);
     speak(c.pt, 0.8);
   };
@@ -380,6 +380,26 @@ function flashcards() {
   document.getElementById('fcsend').onclick = () => answer(inp.value);
   inp.onkeydown = e => { if (e.key === 'Enter') answer(inp.value); };
   document.getElementById('fcskip').onclick = () => answer('', true);
+  // swipe the card left or right to skip it: no score change, it comes back a few cards later
+  function skipCard() {
+    const idx = queue[pos]; queue.splice(pos, 1); queue.splice(Math.min(pos + 4, queue.length), 0, idx); show();
+  }
+  let sx = 0, sy = 0, dx = 0, dragging = false;
+  area.addEventListener('touchstart', e => { const el = area.querySelector('.fc'); if (!el || e.target.closest('button')) return; sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0; dragging = true; el.style.transition = 'none'; }, { passive: true });
+  area.addEventListener('touchmove', e => {
+    if (!dragging) return; const el = area.querySelector('.fc'); if (!el) return;
+    dx = e.touches[0].clientX - sx;
+    if (Math.abs(e.touches[0].clientY - sy) > Math.abs(dx)) return; // vertical gesture, ignore
+    el.style.transform = `translateX(${dx}px) rotate(${dx / 25}deg)`; el.style.opacity = String(1 - Math.min(Math.abs(dx) / 300, 0.6));
+  }, { passive: true });
+  area.addEventListener('touchend', () => {
+    if (!dragging) return; dragging = false; const el = area.querySelector('.fc'); if (!el) return;
+    if (Math.abs(dx) > 90 && !el.classList.contains('ok')) {
+      el.style.transition = 'transform .2s, opacity .2s'; el.style.transform = `translateX(${dx > 0 ? 500 : -500}px)`; el.style.opacity = '0';
+      const wasAnswered = el.classList.contains('bad');
+      setTimeout(() => wasAnswered ? next() : skipCard(), 180);
+    } else { el.style.transition = 'transform .2s, opacity .2s'; el.style.transform = ''; el.style.opacity = ''; }
+  });
   const mic = document.getElementById('fcmic');
   if (mic) mic.onclick = () => {
     if (rec) { rec.stop(); return; }
