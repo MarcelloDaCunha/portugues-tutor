@@ -408,6 +408,8 @@ function flashcards() {
       setTimeout(() => answered ? next() : skipCard(), 180);
     } else reset();
   });
+  const mic = document.getElementById('fcmic');
+  if (mic) mic.onclick = () => {
     if (rec) { rec.stop(); return; }
     speechSynthesis.cancel();
     rec = new SR(); rec.lang = 'en-US'; rec.maxAlternatives = 3;
