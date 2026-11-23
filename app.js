@@ -156,7 +156,14 @@ function lesson(l) {
     <div class="bar"><input id="txt" placeholder="Digite ou fale…" autocomplete="off"><button id="send">➤</button>${SR && !IOS_STANDALONE ? '<button class="mic" id="mic">🎤</button>' : ''}</div>`;
   const chat = document.getElementById('chat'), txt = document.getElementById('txt');
   const add = html => { chat.insertAdjacentHTML('beforeend', html); chat.scrollTop = chat.scrollHeight; };
-  const log = [];
+  const log = [], sid = Date.now();
+  // saved after every turn, so a conversation is never lost even if you leave early
+  const persist = summary => {
+    if (log.length < 2) return;
+    const h = store.get('history', []).filter(x => x.sid !== sid);
+    h.push({ sid, id: l.id, title: l.title, level: l.level, date: new Date().toLocaleDateString(), summary: summary || '', log });
+    store.set('history', h.slice(-60));
+  };
   const addEntry = e => { log.push(e); add(entryHtml(e)); };
   const aiBubble = m => addEntry({ k: 'ai', text: m.text, hint: m.hint });
   wireChat(chat);
@@ -182,6 +189,7 @@ function lesson(l) {
       const p = progress();
       (r.corrections || []).forEach(x => p.notes.push(`${x.said} → ${x.better}`));
       store.set('progress', p);
+      persist();
       if (turn >= TURNS) finish(r.summary);
     } catch (e) {
       document.getElementById('wait')?.remove(); turn--; msgs.pop(); tn();
@@ -195,9 +203,7 @@ function lesson(l) {
     const p = progress(); if (!p.done.includes(l.id)) p.done.push(l.id);
     if (summary) p.notes.push('📘 ' + l.title + ': ' + summary);
     store.set('progress', p);
-    const hist = store.get('history', []);
-    hist.push({ id: l.id, title: l.title, level: l.level, date: new Date().toLocaleDateString(), summary: summary || '', log });
-    store.set('history', hist.slice(-60));
+    persist(summary);
     add(`<div class="card"><b>🎉 Lição completa!</b><br><span class="small">${esc(summary || '')}</span><br><br><button class="primary" id="fin">Concluir</button></div>`);
     document.getElementById('fin').onclick = home;
   }
