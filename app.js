@@ -8,9 +8,16 @@ const store = {
 };
 const cfg = () => ({ key: '', model: 'gemini-flash-lite-latest', budget: 400, ...store.get('cfg', {}) });
 const progress = () => store.get('progress', { done: [], notes: [] });
-const today = () => new Date().toISOString().slice(0, 10);
+// Gemini free-tier quotas reset at midnight Pacific time, so count days that way
+const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 const usage = () => { const u = store.get('usage', {}); return u.d === today() ? u.n : 0; };
 const bump = () => store.set('usage', { d: today(), n: usage() + 1 });
+// calls left today (counted on this phone; Google resets the free quota at midnight Pacific)
+const callsLeft = () => Math.max(0, cfg().budget - usage());
+const usageHtml = () => { const b = cfg().budget, u = usage(), left = callsLeft();
+  return `<div class="card"><div style="display:flex;justify-content:space-between"><b>Uso hoje</b><span class="small">${u} / ${b} chamadas</span></div>
+  <div class="prog" style="margin:8px 0"><i style="width:${Math.min(100, u / b * 100)}%;background:${left < b * 0.15 ? '#dc2626' : '#16a34a'}"></i></div>
+  <div class="small">${left} restantes ≈ <b>${Math.floor(left / TURNS)} lições</b> (${TURNS} chamadas cada) · reinicia à meia-noite do Pacífico</div></div>`; };
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 // ---------- speech ----------
@@ -61,7 +68,7 @@ function home() {
   <div class="pad">
     <div class="card"><div class="small">${act ? 'Em andamento' : 'Próxima lição'} · ${next.level}</div><h2 style="margin:4px 0">${esc(next.title)}</h2>
       <div class="small">${esc(next.scenario)}</div><br><button class="primary" id="go">${act ? `Continuar (${act.turn}/${TURNS})` : 'Começar (~5 min)'}</button>${act ? ' <button id="restart">Recomeçar</button>' : ''}</div>
-    <div class="small">Chamadas hoje: ${usage()} / ${c.budget} · uma lição ≈ ${TURNS} chamadas</div>
+    ${usageHtml()}
     ${!c.key ? '<div class="card">⚠️ Add your free Gemini API key in ⚙️ first.</div>' : ''}
     <h2>Níveis</h2>
     ${levels.map(lv => {
@@ -94,15 +101,10 @@ function settings() {
     <p>Gemini API key</p><input id="key" type="password" value="${esc(c.key)}" autocomplete="off">
     <p>Model <span class="small">(Flash-Lite has the biggest free daily allowance)</span></p><input id="model" value="${esc(c.model)}">
     <p>Daily call budget <span class="small">(app stops before your free limit; check your limit at aistudio.google.com)</span></p><input id="budget" type="number" value="${c.budget}">
-    <p>Voice <span class="small">(download Premium/Enhanced voices in iOS Settings for a more natural sound)</span></p><select id="voice"><option value="">Auto (best available)</option>${speechSynthesis.getVoices().filter(v => v.lang.replace('_', '-') === 'pt-BR').map(v => `<option ${v.name === c.voice ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select> <button id="vtest">▶︎ Test</button>
     <br><br><button class="primary" id="save">Save</button> <button id="reset">Reset progress</button></div>`;
   document.getElementById('back').onclick = home;
-  document.getElementById('vtest').onclick = () => {
-    const v = speechSynthesis.getVoices().find(x => x.name === voice.value); if (v) ptVoice = v; else pickVoice();
-    unlockAudio(); speak('Oi! Tudo bem? Vamos praticar português juntos.');
-  };
   document.getElementById('save').onclick = () => {
-    store.set('cfg', { key: key.value.trim(), model: model.value.trim() || 'gemini-flash-lite-latest', budget: +budget.value || 400, voice: voice.value }); pickVoice(); home();
+    store.set('cfg', { key: key.value.trim(), model: model.value.trim() || 'gemini-flash-lite-latest', budget: +budget.value || 400 }); home();
   };
   document.getElementById('reset').onclick = () => { if (confirm('Reset all progress?')) { store.set('progress', { done: [], notes: [] }); store.set('chats', {}); localStorage.removeItem('active'); home(); } };
 }
@@ -234,7 +236,7 @@ function lesson(l, auto) {
   const add = html => { chat.insertAdjacentHTML('beforeend', html); chat.scrollTop = chat.scrollHeight; };
   const addEntry = e => { log.push(e); add(entryHtml(e)); };
   const aiBubble = m => addEntry({ k: 'ai', text: m.text, hint: m.hint });
-  const tn = () => document.getElementById('tn').textContent = live ? `${turn}/${TURNS}` : '';
+  const tn = () => document.getElementById('tn').textContent = live ? `${turn}/${TURNS} · ${callsLeft()} restantes` : '';
   wireChat(chat);
   // whenever the chat area changes size (keyboard opening/closing), keep the newest message in view
   if (window.ResizeObserver) new ResizeObserver(() => { if (document.activeElement === txt) chat.scrollTop = chat.scrollHeight; }).observe(chat);
@@ -269,7 +271,7 @@ function lesson(l, auto) {
       (r.corrections || []).forEach(x => addEntry({ k: 'fix', said: x.said, better: x.better, why: x.why }));
       if (r.pronunciation) addEntry({ k: 'tip', text: r.pronunciation });
       const m = { role: 'ai', text: r.reply, hint: r.hint_en }; msgs.push(m); aiBubble(m); speak(r.reply);
-      persistAll();
+      persistAll(); tn();
       if (turn >= TURNS) finish(r.summary, r.words);
     } catch (e) {
       document.getElementById('wait')?.remove(); turn--; msgs.pop(); tn();
@@ -321,19 +323,24 @@ function addCards(words, lesson) {
   }
   store.set('cards', cards);
 }
-const isMatch = (said, target) => {
-  const a = norm(said), b = norm(target);
-  return !!a && (a === b || a.split(' ').includes(b) || (b.length >= 5 && lev(a, b) <= 1));
+// English answers: accept any of the listed meanings ("to speak; to talk" -> "speak", "talk"), ignoring "to/a/the"
+const enAnswers = en => [en, ...String(en).replace(/\([^)]*\)/g, ' ').split(/[,;\/]|\bor\b/)]
+  .map(s => norm(s).replace(/^(to|a|an|the) /, '')).filter(Boolean);
+const isMatch = (said, en) => {
+  const a = norm(said).replace(/^(to|a|an|the) /, '');
+  return !!a && enAnswers(en).some(b => a === b || a.split(' ').includes(b) || (b.length >= 5 && lev(a, b) <= 1));
 };
 function flashcards() {
   const cards = store.get('cards', []);
   $app.innerHTML = `<header><button class="ghost" id="back">←</button><h1>🃏 Flashcards</h1><span class="small" id="fcn"></span></header>
     <div class="chat" id="fcarea"></div>
-    <div class="bar" id="fcbar"><input id="fcin" placeholder="Diga ou digite a palavra…" autocomplete="off" autocapitalize="off"><button id="fcsend">➤</button><button id="fcskip">?</button>${SR && !IOS_STANDALONE ? '<button class="mic" id="fcmic">🎤</button>' : ''}</div>`;
+    <div class="bar" id="fcbar"><input id="fcin" placeholder="Say or type the English meaning…" autocomplete="off" autocapitalize="off"><button id="fcsend">➤</button><button id="fcskip">?</button>${SR && !IOS_STANDALONE ? '<button class="mic" id="fcmic">🎤</button>' : ''}</div>`;
   document.getElementById('back').onclick = () => { speechSynthesis.cancel(); home(); };
   const area = document.getElementById('fcarea'), inp = document.getElementById('fcin'), bar = document.getElementById('fcbar');
   if (!cards.length) { bar.hidden = true; area.innerHTML = '<div class="card">No cards yet. Finish a lesson and its new words show up here.</div>'; return; }
-  const queue = cards.map((_, i) => i).sort(() => Math.random() - 0.5);
+  // cards are never removed; each session picks the 15 you know least (new and often-missed first)
+  const weak = i => (cards[i].ok || 0) - 2 * (cards[i].miss || 0) + Math.random() * 1.5;
+  const queue = cards.map((_, i) => i).sort((a, b) => weak(a) - weak(b)).slice(0, 15).sort(() => Math.random() - 0.5);
   let pos = 0, right = 0, total = 0, locked = false, retried = new Set(), rec = null;
   const show = () => {
     locked = false; inp.value = ''; bar.hidden = false;
@@ -344,7 +351,7 @@ function flashcards() {
     }
     const c = cards[queue[pos]];
     document.getElementById('fcn').textContent = `${Math.min(pos + 1, queue.length)}/${queue.length}`;
-    area.innerHTML = `<div class="fc flipin"><div class="small">Diga em voz alta</div><div class="fcw">${esc(c.pt)}</div><button class="ghost" id="fcspeak">🔊</button>${IOS_STANDALONE ? '<div class="small">Toque na caixa e use o microfone do teclado.</div>' : ''}</div>`;
+    area.innerHTML = `<div class="fc flipin"><div class="small">What does it mean? Say it in English</div><div class="fcw">${esc(c.pt)}</div><button class="ghost" id="fcspeak">🔊</button>${IOS_STANDALONE ? '<div class="small">Tap the box and use the keyboard microphone key (English).</div>' : ''}</div>`;
     document.getElementById('fcspeak').onclick = () => speak(c.pt, 0.7);
     speak(c.pt, 0.8);
   };
@@ -352,14 +359,15 @@ function flashcards() {
   function answer(said, skipped) {
     if (locked) return; if (!skipped && !said.trim()) return;
     locked = true; total++;
-    const idx = queue[pos], c = cards[idx], ok = !skipped && isMatch(said, c.pt), el = area.querySelector('.fc');
+    const idx = queue[pos], c = cards[idx], ok = !skipped && isMatch(said, c.en), el = area.querySelector('.fc');
     if (ok) {
-      right++; el.className = 'fc ok'; el.innerHTML = `<div class="fcw">✓ ${esc(c.pt)}</div><div class="small">${esc(c.en)}</div>`;
+      right++; c.ok = (c.ok || 0) + 1; store.set('cards', cards); el.className = 'fc ok'; el.innerHTML = `<div class="fcw">✓ ${esc(c.pt)}</div><div class="small">${esc(c.en)}</div>`;
       setTimeout(next, 1100);
     } else {
       el.className = 'fc bad flipin';
-      el.innerHTML = `<div class="small">${esc(c.pt)} 🔊</div><div class="fcw">${esc(c.en)}</div>${said ? `<div class="small">Ouvi: ${esc(said)}</div>` : ''}<br><button class="primary" id="fcnext">Próxima ➜</button>`;
+      el.innerHTML = `<div class="small">${esc(c.pt)} 🔊</div><div class="fcw">${esc(c.en)}</div>${said ? `<div class="small">Heard: ${esc(said)}</div>` : ''}<br><button class="primary" id="fcnext">Próxima ➜</button>`;
       speak(c.pt, 0.7);
+      c.miss = (c.miss || 0) + 1; store.set('cards', cards);
       if (!retried.has(idx)) { retried.add(idx); queue.splice(Math.min(pos + 4, queue.length), 0, idx); } // see it again soon
       document.getElementById('fcnext').onclick = next;
     }
@@ -371,10 +379,10 @@ function flashcards() {
   if (mic) mic.onclick = () => {
     if (rec) { rec.stop(); return; }
     speechSynthesis.cancel();
-    rec = new SR(); rec.lang = 'pt-BR'; rec.maxAlternatives = 3;
+    rec = new SR(); rec.lang = 'en-US'; rec.maxAlternatives = 3;
     mic.classList.add('rec');
-    rec.onresult = e => { const alts = [...e.results[0]].map(a => a.transcript); const c = cards[queue[pos]]; answer(alts.find(a => isMatch(a, c.pt)) || alts[0]); };
-    rec.onerror = () => { inp.placeholder = 'Mic indisponível — use o teclado'; };
+    rec.onresult = e => { const alts = [...e.results[0]].map(a => a.transcript); const c = cards[queue[pos]]; answer(alts.find(a => isMatch(a, c.en)) || alts[0]); };
+    rec.onerror = () => { inp.placeholder = 'Mic unavailable — use the keyboard'; };
     rec.onend = () => { mic.classList.remove('rec'); rec = null; };
     rec.start();
   };
